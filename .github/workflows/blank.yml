@@ -1,4 +1,4 @@
-name: Build Armbian RK3588 DTS
+name: Build RK3588 DTS
 
 on:
   workflow_dispatch:
@@ -8,15 +8,17 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # ============================================================
-      # 1. Checkout 当前仓库
-      # ============================================================
+
+      # ==========================================================
+      # Checkout
+      # ==========================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 2. 安装编译依赖
-      # ============================================================
+
+      # ==========================================================
+      # Install dependencies
+      # ==========================================================
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -39,32 +41,25 @@ jobs:
             curl \
             xz-utils
 
-      # ============================================================
-      # 3. Clone Armbian Build
-      # ============================================================
-      - name: Clone Armbian Build
+
+      # ==========================================================
+      # Clone Armbian
+      # ==========================================================
+      - name: Clone Armbian
         run: |
           git clone --depth=1 \
             https://github.com/armbian/build.git \
             armbian-build
 
-      # ============================================================
-      # 4. 准备 Armbian 编译环境
-      # ============================================================
-      - name: Prepare Armbian
-        run: |
-          cd armbian-build
 
-          mkdir -p userpatches
-
-          cat > userpatches/config-example.conf <<'EOF'
-          EOF
-
-      # ============================================================
-      # 5. 下载 RK3588 Kernel
-      # ============================================================
-      - name: Prepare Kernel Source
+      # ==========================================================
+      # Prepare Kernel
+      # ==========================================================
+      - name: Prepare Kernel
         shell: bash
+        env:
+          TERM: dumb
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -e
 
@@ -76,26 +71,33 @@ jobs:
             RELEASE=bookworm \
             BUILD_ONLY=yes \
             KERNEL_ONLY=yes \
+            KERNEL_CONFIGURE=no \
             NO_APT_CACHER=yes \
-            CLEAN_LEVEL=make,debs
+            CLEAN_LEVEL=""
 
-      # ============================================================
-      # 6. 查找 Kernel Source
-      # ============================================================
-      - name: Find Kernel Source
+      # ==========================================================
+      # Find Kernel
+      # ==========================================================
+      - name: Find Kernel source
         shell: bash
         run: |
-          echo "===== Kernel source directories ====="
+          set -e
 
-          find cache/sources/linux-kernel-worktree \
+          echo "=========================================="
+          echo "Kernel source"
+          echo "=========================================="
+
+          find \
+            armbian-build/cache/sources/linux-kernel-worktree \
             -maxdepth 2 \
-            -type d \
+            -type f \
+            -name Makefile \
             -print
 
-      # ============================================================
-      # 7. 编译 DTS
-      # ============================================================
-      - name: Compile RK3588 DTS
+      # ==========================================================
+      # Copy DTS
+      # ==========================================================
+      - name: Install EAIO DTS
         shell: bash
         run: |
           set -e
@@ -107,53 +109,106 @@ jobs:
             -type d \
             | head -n 1)
 
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "ERROR: Kernel source not found"
+            exit 1
+          fi
+
           echo "Kernel directory:"
           echo "$KERNEL_DIR"
 
-          if [ ! -d "$KERNEL_DIR" ]; then
+          DTS_DIR="$KERNEL_DIR/arch/arm64/boot/dts/rockchip"
+
+          mkdir -p "$DTS_DIR"
+
+          cp \
+            "rk3588-eaio-3588j-v2(2).dts" \
+            "$DTS_DIR/rk3588-eaio-3588j-v2.dts"
+
+          echo "=========================================="
+          echo "DTS installed"
+          echo "=========================================="
+
+          ls -lh \
+            "$DTS_DIR/rk3588-eaio-3588j-v2.dts"
+
+
+      # ==========================================================
+      # Compile DTS
+      # ==========================================================
+      - name: Compile EAIO DTS
+        shell: bash
+        run: |
+          set -e
+
+          KERNEL_DIR=$(find \
+            armbian-build/cache/sources/linux-kernel-worktree \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | head -n 1)
+
+          if [ -z "$KERNEL_DIR" ]; then
             echo "ERROR: Kernel source not found"
             exit 1
           fi
 
           cd "$KERNEL_DIR"
 
-          echo "========================================"
-          echo "Kernel root:"
+          echo "=========================================="
+          echo "Kernel directory"
+          echo "=========================================="
+
           pwd
-          echo "========================================"
 
-          echo "Kernel Makefile:"
-          ls -l Makefile
-
-          echo "========================================"
-          echo "Compile DTS"
-          echo "========================================"
+          echo "=========================================="
+          echo "Compile EAIO DTS"
+          echo "=========================================="
 
           make \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            dtbs
+            arch/arm64/boot/dts/rockchip/rk3588-eaio-3588j-v2.dtb
 
-      # ============================================================
-      # 8. 查找生成的 DTB
-      # ============================================================
-      - name: Find DTB
+
+      # ==========================================================
+      # Verify DTB
+      # ==========================================================
+      - name: Verify DTB
         shell: bash
         run: |
-          echo "===== Generated DTBs ====="
+          set -e
 
-          find armbian-build/cache/sources/linux-kernel-worktree \
-            -type f \
-            -name "*.dtb" \
-            -print
+          KERNEL_DIR=$(find \
+            armbian-build/cache/sources/linux-kernel-worktree \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | head -n 1)
 
-      # ============================================================
-      # 9. 上传 DTB
-      # ============================================================
+          DTB="$KERNEL_DIR/arch/arm64/boot/dts/rockchip/rk3588-eaio-3588j-v2.dtb"
+
+          if [ ! -f "$DTB" ]; then
+            echo "ERROR: DTB was not generated"
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo "DTB generated successfully"
+          echo "=========================================="
+
+          ls -lh "$DTB"
+
+          file "$DTB"
+
+
+      # ==========================================================
+      # Upload DTB
+      # ==========================================================
       - name: Upload DTB
         uses: actions/upload-artifact@v4
         with:
-          name: rk3588-dtb
+          name: rk3588-eaio-3588j-v2-dtb
           path: |
-            armbian-build/cache/sources/linux-kernel-worktree/**/*.dtb
+            armbian-build/cache/sources/linux-kernel-worktree/*/arch/arm64/boot/dts/rockchip/rk3588-eaio-3588j-v2.dtb
           if-no-files-found: error
