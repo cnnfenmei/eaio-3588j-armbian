@@ -1,7 +1,7 @@
-name: Build Armbian EAIO-3588J V2 DTB Patch
+name: Build Armbian EAIO-3588J V2 DTB Patch (Chroot Method)
 
 on:
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch:
   push:
     branches: [ main ]
 
@@ -9,61 +9,94 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout repo
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install host dependencies
         run: |
           sudo apt update
-          sudo apt install -y wget unzip git build-essential device-tree-compiler libssl-dev bc kmod cpio flex bison libelf-dev
+          sudo apt install -y wget unzip xz-utils losetup mount parted qemu-user-static
 
-      # 1. 下载官方 Firefly ITX3588J Armbian 镜像（你指定版本可自行修改URL）
-      - name: Download base Armbian image
+      - name: Download official Firefly ITX 3588J Armbian image
         run: |
-          # 替换为你实际的 Armbian 26.11.0-trunk.1 Trixie 6.1.115 镜像地址
           IMG_URL="https://github.com/armbian/community/releases/download/26.11.0-trunk.1/Armbian_community_26.11.0-trunk.1_Firefly-itx-3588j_trixie_vendor_6.1.115_minimal.img.xz"
-          wget -O base.img.xz "${IMG_URL}"
+          wget -c -O base.img.xz "${IMG_URL}"
           xz -d base.img.xz
 
-      # 2. 获取匹配内核源码，用于编译DTS（dtc版本、内核头文件必须和镜像内核一致！）
-      # 方式A：直接使用镜像内 /usr/src/linux-headers 提取dtc参数；
-      # 简易方案：拉取对应 rockchip 6.1 vendor 内核源码
-      - name: Clone matching kernel source (Rockchip 6.1 vendor)
-        run: |
-          git clone --depth 1 --branch vendor/rk3588-6.1 https://github.com/armbian/kernel-rockchip.git kernel
-          cd kernel
-
-      # 3. 编译你的 DTS 生成 DTB
-      - name: Compile custom DTS to DTB
-        run: |
-          DTS_NAME=rk3588-eaio-3588j-v2
-          dtc -I dts -O dtb -o ${DTS_NAME}.dtb ./${DTS_NAME}.dts
-          ls -l ${DTS_NAME}.dtb
-
-      # 4. 挂载Armbian镜像BOOT分区，替换dtb
-      - name: Mount image and replace DTB
+      - name: Mount Armbian image partitions
         run: |
           sudo losetup -f --show base.img > loopdev.txt
           LOOP=$(cat loopdev.txt)
-          sudo partprobe ${LOOP}
-          # boot分区一般是p1
-          sudo mkdir -p /mnt/armbian-boot
-          sudo mount ${LOOP}p1 /mnt/armbian-boot
-          # 【重要】确认原版dtb文件名！Firefly itx-3588j 默认dtb名称
-          # 原版：rk3588-firefly-itx-3588j.dtb
-          sudo cp rk3588-eaio-3588j-v2.dtb /mnt/armbian-boot/dtb/rk3588-firefly-itx-3588j.dtb
-          # 如果extlinux/armbianEnv.txt需要修改fdtfile参数，在此添加
-          # sudo sed -i 's/fdtfile=.*/fdtfile=rk3588-eaio-3588j-v2.dtb/' /mnt/armbian-boot/extlinux/armbianEnv.txt
-          sudo umount /mnt/armbian-boot
-          sudo losetup -d ${LOOP}
+          sudo partprobe "${LOOP}"
 
-      # 5. 压缩镜像
-      - name: Compress final image
+          # 创建挂载目录
+          sudo mkdir -p /mnt/rootfs /mnt/boot
+
+          # p1 = boot, p2 = rootfs (Armbian标准分区布局)
+          sudo mount "${LOOP}p1" /mnt/boot
+          sudo mount "${LOOP}p2" /mnt/rootfs
+
+          # 准备chroot环境
+          sudo cp /usr/bin/qemu-aarch64-static /mnt/rootfs/usr/bin/
+          sudo mount --bind /dev /mnt/rootfs/dev
+          sudo mount --bind /proc /mnt/rootfs/proc
+          sudo mount --bind /sys /mnt/rootfs/sys
+          sudo mount --bind /tmp /mnt/rootfs/tmp
+
+      - name: Copy custom DTS into chroot
+        run: |
+          DTS_FILE=rk3588-eaio-3588j-v2.dts
+          sudo cp ./${DTS_FILE} /mnt/rootfs/root/
+
+      - name: Compile DTS inside Armbian chroot using native dtc
+        run: |
+          sudo chroot /mnt/rootfs /bin/bash <<'EOF'
+          cd /root
+          DTS_NAME=rk3588-eaio-3588j-v2
+          # 使用内核配套dtc，优先内核源码内dtc，fallback系统dtc
+          if [ -d /usr/src/linux-headers-*/scripts/dtc ]; then
+            DTC=$(find /usr/src/linux-headers-*/scripts/dtc -name dtc | head -n1)
+          else
+            DTC=dtc
+          fi
+          echo "Using dtc binary: $DTC"
+          $DTC -I dts -O dtb -o ${DTS_NAME}.dtb ${DTS_NAME}.dts
+          ls -l ${DTS_NAME}.dtb
+          EOF
+
+      - name: Extract compiled DTB out of chroot
+        run: |
+          DTB_NAME=rk3588-eaio-3588j-v2.dtb
+          sudo cp /mnt/rootfs/root/${DTB_NAME} ./
+
+      - name: Replace DTB on BOOT partition (two options choose one)
+        run: |
+          DTB_NEW=rk3588-eaio-3588j-v2.dtb
+          DTB_ORIG=rk3588-firefly-itx-3588j.dtb
+
+          # 方案A：直接覆盖原版dtb（推荐最简单，无需修改armbianEnv.txt）
+          sudo cp ./${DTB_NEW} /mnt/boot/dtb/${DTB_ORIG}
+
+          # 方案B：保留两份dtb，修改启动加载参数，取消注释启用
+          #sudo cp ./${DTB_NEW} /mnt/boot/dtb/
+          #sudo sed -i 's|^fdtfile=.*|fdtfile='"${DTB_NEW}"'|' /mnt/boot/extlinux/armbianEnv.txt
+
+      - name: Cleanup chroot & unmount
+        run: |
+          sudo umount -l /mnt/rootfs/tmp
+          sudo umount -l /mnt/rootfs/sys
+          sudo umount -l /mnt/rootfs/proc
+          sudo umount -l /mnt/rootfs/dev
+          sudo umount -l /mnt/rootfs
+          sudo umount -l /mnt/boot
+          LOOP=$(cat loopdev.txt)
+          sudo losetup -d "${LOOP}"
+
+      - name: Repack final image
         run: |
           mv base.img Armbian_EAIO-3588J-V2.img
           xz Armbian_EAIO-3588J-V2.img
 
-      # 6. 上传制品
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
