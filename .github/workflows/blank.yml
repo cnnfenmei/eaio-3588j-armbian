@@ -1,0 +1,71 @@
+name: Build Armbian EAIO-3588J V2 DTB Patch
+
+on:
+  workflow_dispatch: # 支持手动触发
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y wget unzip git build-essential device-tree-compiler libssl-dev bc kmod cpio flex bison libelf-dev
+
+      # 1. 下载官方 Firefly ITX3588J Armbian 镜像（你指定版本可自行修改URL）
+      - name: Download base Armbian image
+        run: |
+          # 替换为你实际的 Armbian 26.11.0-trunk.1 Trixie 6.1.115 镜像地址
+          IMG_URL="https://dl.armbian.com/firefly-itx-3588j/Armbian_26.11.0-trunk.1_Firefly-itx-3588j_trixie_vendor_6.1.115.img.xz"
+          wget -O base.img.xz "${IMG_URL}"
+          xz -d base.img.xz
+
+      # 2. 获取匹配内核源码，用于编译DTS（dtc版本、内核头文件必须和镜像内核一致！）
+      # 方式A：直接使用镜像内 /usr/src/linux-headers 提取dtc参数；
+      # 简易方案：拉取对应 rockchip 6.1 vendor 内核源码
+      - name: Clone matching kernel source (Rockchip 6.1 vendor)
+        run: |
+          git clone --depth 1 --branch vendor/rk3588-6.1 https://github.com/armbian/kernel-rockchip.git kernel
+          cd kernel
+
+      # 3. 编译你的 DTS 生成 DTB
+      - name: Compile custom DTS to DTB
+        run: |
+          DTS_NAME=rk3588-eaio-3588j-v2
+          dtc -I dts -O dtb -o ${DTS_NAME}.dtb ./${DTS_NAME}.dts
+          ls -l ${DTS_NAME}.dtb
+
+      # 4. 挂载Armbian镜像BOOT分区，替换dtb
+      - name: Mount image and replace DTB
+        run: |
+          sudo losetup -f --show base.img > loopdev.txt
+          LOOP=$(cat loopdev.txt)
+          sudo partprobe ${LOOP}
+          # boot分区一般是p1
+          sudo mkdir -p /mnt/armbian-boot
+          sudo mount ${LOOP}p1 /mnt/armbian-boot
+          # 【重要】确认原版dtb文件名！Firefly itx-3588j 默认dtb名称
+          # 原版：rk3588-firefly-itx-3588j.dtb
+          sudo cp rk3588-eaio-3588j-v2.dtb /mnt/armbian-boot/dtb/rk3588-firefly-itx-3588j.dtb
+          # 如果extlinux/armbianEnv.txt需要修改fdtfile参数，在此添加
+          # sudo sed -i 's/fdtfile=.*/fdtfile=rk3588-eaio-3588j-v2.dtb/' /mnt/armbian-boot/extlinux/armbianEnv.txt
+          sudo umount /mnt/armbian-boot
+          sudo losetup -d ${LOOP}
+
+      # 5. 压缩镜像
+      - name: Compress final image
+        run: |
+          mv base.img Armbian_EAIO-3588J-V2.img
+          xz Armbian_EAIO-3588J-V2.img
+
+      # 6. 上传制品
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EAIO-3588J-V2-Armbian-Image
+          path: Armbian_EAIO-3588J-V2.img.xz
