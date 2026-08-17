@@ -21,7 +21,7 @@ jobs:
       - name: Download base Armbian image
         run: |
           # 替换为你实际的 Armbian 26.11.0-trunk.1 Trixie 6.1.115 镜像地址
-          IMG_URL="https://dl.armbian.com/firefly-itx-3588j/Armbian_26.11.0-trunk.1_Firefly-itx-3588j_trixie_vendor_6.1.115.img.xz"
+          IMG_URL="https://github.com/armbian/community/releases/download/26.11.0-trunk.1/Armbian_community_26.11.0-trunk.1_Firefly-itx-3588j_trixie_vendor_6.1.115_minimal.img.xz"
           wget -O base.img.xz "${IMG_URL}"
           xz -d base.img.xz
 
