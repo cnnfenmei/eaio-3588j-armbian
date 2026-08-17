@@ -1,104 +1,159 @@
-name: Build Armbian EAIO-3588J V2 DTB Patch (Chroot Method)
+name: Build Armbian RK3588 DTS
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
+  build-dts:
+    runs-on: ubuntu-22.04
+
     steps:
-      - name: Checkout source
+      # ============================================================
+      # 1. Checkout 当前仓库
+      # ============================================================
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
+      # ============================================================
+      # 2. 安装编译依赖
+      # ============================================================
+      - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y wget unzip xz-utils losetup mount parted qemu-user-static
+          sudo apt-get update
 
-      - name: Download official Firefly ITX 3588J Armbian image
+          sudo apt-get install -y \
+            git \
+            make \
+            gcc \
+            g++ \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libncurses-dev \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            rsync \
+            wget \
+            curl \
+            xz-utils
+
+      # ============================================================
+      # 3. Clone Armbian Build
+      # ============================================================
+      - name: Clone Armbian Build
         run: |
-          IMG_URL="https://github.com/armbian/community/releases/download/26.11.0-trunk.1/Armbian_community_26.11.0-trunk.1_Firefly-itx-3588j_trixie_vendor_6.1.115_minimal.img.xz"
-          wget -c -O base.img.xz "${IMG_URL}"
-          xz -d base.img.xz
+          git clone --depth=1 \
+            https://github.com/armbian/build.git \
+            armbian-build
 
-      - name: Mount Armbian image partitions
+      # ============================================================
+      # 4. 准备 Armbian 编译环境
+      # ============================================================
+      - name: Prepare Armbian
         run: |
-          sudo losetup -f --show base.img > loopdev.txt
-          LOOP=$(cat loopdev.txt)
-          sudo partprobe "${LOOP}"
+          cd armbian-build
 
-          # 创建挂载目录
-          sudo mkdir -p /mnt/rootfs /mnt/boot
+          mkdir -p userpatches
 
-          # p1 = boot, p2 = rootfs (Armbian标准分区布局)
-          sudo mount "${LOOP}p1" /mnt/boot
-          sudo mount "${LOOP}p2" /mnt/rootfs
-
-          # 准备chroot环境
-          sudo cp /usr/bin/qemu-aarch64-static /mnt/rootfs/usr/bin/
-          sudo mount --bind /dev /mnt/rootfs/dev
-          sudo mount --bind /proc /mnt/rootfs/proc
-          sudo mount --bind /sys /mnt/rootfs/sys
-          sudo mount --bind /tmp /mnt/rootfs/tmp
-
-      - name: Copy custom DTS into chroot
-        run: |
-          DTS_FILE=rk3588-eaio-3588j-v2.dts
-          sudo cp ./${DTS_FILE} /mnt/rootfs/root/
-
-      - name: Compile DTS inside Armbian chroot using native dtc
-        run: |
-          sudo chroot /mnt/rootfs /bin/bash <<'EOF'
-          cd /root
-          DTS_NAME=rk3588-eaio-3588j-v2
-          # 使用内核配套dtc，优先内核源码内dtc，fallback系统dtc
-          if [ -d /usr/src/linux-headers-*/scripts/dtc ]; then
-            DTC=$(find /usr/src/linux-headers-*/scripts/dtc -name dtc | head -n1)
-          else
-            DTC=dtc
-          fi
-          echo "Using dtc binary: $DTC"
-          $DTC -I dts -O dtb -o ${DTS_NAME}.dtb ${DTS_NAME}.dts
-          ls -l ${DTS_NAME}.dtb
+          cat > userpatches/config-example.conf <<'EOF'
           EOF
 
-      - name: Extract compiled DTB out of chroot
+      # ============================================================
+      # 5. 下载 RK3588 Kernel
+      # ============================================================
+      - name: Prepare Kernel Source
+        shell: bash
         run: |
-          DTB_NAME=rk3588-eaio-3588j-v2.dtb
-          sudo cp /mnt/rootfs/root/${DTB_NAME} ./
+          set -e
 
-      - name: Replace DTB on BOOT partition (two options choose one)
+          cd armbian-build
+
+          ./compile.sh \
+            BOARD=eaio-3588j \
+            BRANCH=current \
+            RELEASE=bookworm \
+            BUILD_ONLY=yes \
+            KERNEL_ONLY=yes \
+            NO_APT_CACHER=yes \
+            CLEAN_LEVEL=make,debs
+
+      # ============================================================
+      # 6. 查找 Kernel Source
+      # ============================================================
+      - name: Find Kernel Source
+        shell: bash
         run: |
-          DTB_NEW=rk3588-eaio-3588j-v2.dtb
-          DTB_ORIG=rk3588-firefly-itx-3588j.dtb
+          echo "===== Kernel source directories ====="
 
-          # 方案A：直接覆盖原版dtb（推荐最简单，无需修改armbianEnv.txt）
-          sudo cp ./${DTB_NEW} /mnt/boot/dtb/${DTB_ORIG}
+          find cache/sources/linux-kernel-worktree \
+            -maxdepth 2 \
+            -type d \
+            -print
 
-          # 方案B：保留两份dtb，修改启动加载参数，取消注释启用
-          #sudo cp ./${DTB_NEW} /mnt/boot/dtb/
-          #sudo sed -i 's|^fdtfile=.*|fdtfile='"${DTB_NEW}"'|' /mnt/boot/extlinux/armbianEnv.txt
-
-      - name: Cleanup chroot & unmount
+      # ============================================================
+      # 7. 编译 DTS
+      # ============================================================
+      - name: Compile RK3588 DTS
+        shell: bash
         run: |
-          sudo umount -l /mnt/rootfs/tmp
-          sudo umount -l /mnt/rootfs/sys
-          sudo umount -l /mnt/rootfs/proc
-          sudo umount -l /mnt/rootfs/dev
-          sudo umount -l /mnt/rootfs
-          sudo umount -l /mnt/boot
-          LOOP=$(cat loopdev.txt)
-          sudo losetup -d "${LOOP}"
+          set -e
 
-      - name: Repack final image
+          KERNEL_DIR=$(find \
+            armbian-build/cache/sources/linux-kernel-worktree \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | head -n 1)
+
+          echo "Kernel directory:"
+          echo "$KERNEL_DIR"
+
+          if [ ! -d "$KERNEL_DIR" ]; then
+            echo "ERROR: Kernel source not found"
+            exit 1
+          fi
+
+          cd "$KERNEL_DIR"
+
+          echo "========================================"
+          echo "Kernel root:"
+          pwd
+          echo "========================================"
+
+          echo "Kernel Makefile:"
+          ls -l Makefile
+
+          echo "========================================"
+          echo "Compile DTS"
+          echo "========================================"
+
+          make \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            dtbs
+
+      # ============================================================
+      # 8. 查找生成的 DTB
+      # ============================================================
+      - name: Find DTB
+        shell: bash
         run: |
-          mv base.img Armbian_EAIO-3588J-V2.img
-          xz Armbian_EAIO-3588J-V2.img
+          echo "===== Generated DTBs ====="
 
-      - name: Upload artifact
+          find armbian-build/cache/sources/linux-kernel-worktree \
+            -type f \
+            -name "*.dtb" \
+            -print
+
+      # ============================================================
+      # 9. 上传 DTB
+      # ============================================================
+      - name: Upload DTB
         uses: actions/upload-artifact@v4
         with:
-          name: EAIO-3588J-V2-Armbian-Image
-          path: Armbian_EAIO-3588J-V2.img.xz
+          name: rk3588-dtb
+          path: |
+            armbian-build/cache/sources/linux-kernel-worktree/**/*.dtb
+          if-no-files-found: error
